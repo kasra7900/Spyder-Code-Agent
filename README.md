@@ -6,7 +6,7 @@
 
 **AI‑powered coding assistant for Spyder IDE** – automatically detects runtime errors in your Python/ML scripts and fixes them with one click.
 
-![Screenshot placeholder](https://via.placeholder.com/800x400?text=Spyder+Code+Agent)
+![Spyder Code Agent in action](img/demo.gif)
 
 ## Overview
 
