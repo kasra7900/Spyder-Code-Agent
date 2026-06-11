@@ -1,0 +1,19 @@
+[project]
+name = "spyder-code-agent"
+version = "0.1.0"
+description = "AI-powered coding assistant plugin for Spyder IDE"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Amir", email = "mohammadamirdehghanian@gmail.com"}
+]
+keywords = ["spyder", "plugin", "ai", "assistant", "llm"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = ["spyder>=6.0", "openai"]
+
+[project.entry-points."spyder.plugins"]
+code_agent = "spyder_code_agent.plugin:CodeAgent"
