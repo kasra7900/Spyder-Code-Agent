@@ -153,7 +153,6 @@ MIT License. See `LICENSE` for details.
 ---
 
 **Made with ❤️ for the data science and ML Engineer community**
-```
 
 
 
