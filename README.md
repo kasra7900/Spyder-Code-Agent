@@ -1,9 +1,8 @@
 # Spyder Code Agent
 
-[![PyPI version](https://img.shields.io/pypi/v/spyder-code-agent.svg)](https://pypi.org/project/spyder-code-agent/)
-[![Python versions](https://img.shields.io/pypi/pyversions/spyder-code-agent.svg)](https://pypi.org/project/spyder-code-agent/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Spyder plugin](https://img.shields.io/badge/Spyder-6.0+-blue.svg)](https://www.spyder-ide.org/)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Spyder](https://img.shields.io/badge/Spyder-6.0%2B-red)
+![License](https://img.shields.io/badge/License-MIT-green)
 
 **AI‑powered coding assistant for Spyder IDE** – automatically detects runtime errors in your Python/ML scripts and fixes them with one click.
 
@@ -36,3 +35,5 @@ Perfect for **machine learning and data science** workflows where you frequently
 
 ```bash
 pip install spyder-code-agent
+
+
