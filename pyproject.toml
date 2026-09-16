@@ -1,19 +1,61 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "spyder-code-agent"
-version = "0.1.0"
-description = "AI-powered coding assistant plugin for Spyder IDE"
+version = "0.2.0"
+description = "A diagnostic and optional AI-assistance plugin for Spyder"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9,<3.14"
 license = {text = "MIT"}
-authors = [
-    {name = "Amir", email = "mohammadamirdehghanian@gmail.com"}
-]
-keywords = ["spyder", "plugin", "ai", "assistant", "llm"]
+authors = [{name = "Amir", email = "mohammadamirdehghanian@gmail.com"}]
+keywords = ["spyder", "plugin", "debugging", "machine-learning", "deep-learning"]
 classifiers = [
-    "Programming Language :: Python :: 3",
+    "Development Status :: 4 - Beta",
+    "Environment :: Plugins",
+    "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Debuggers",
 ]
-dependencies = ["spyder>=6.0", "openai"]
+# Do not make Spyder a mandatory dependency.  Installing a plugin from a
+# project/kernel environment must not silently install a second, unrelated
+# copy of the IDE; the plugin needs to be installed into Spyder's *host*
+# environment instead.
+dependencies = []
+
+[project.optional-dependencies]
+spyder = ["spyder>=6.0,<6.2"]
+openai = ["openai>=1.30,<3"]
+test = ["pytest>=7.4,<9", "build>=1,<2", "ruff>=0.6,<1"]
+
+[project.scripts]
+spyder-code-agent-doctor = "spyder_code_agent.doctor:main"
 
 [project.entry-points."spyder.plugins"]
 code_agent = "spyder_code_agent.plugin:CodeAgent"
+
+[project.urls]
+Homepage = "https://github.com/kasra7900/Spyder-Code-Agent"
+Issues = "https://github.com/kasra7900/Spyder-Code-Agent/issues"
+
+[tool.setuptools]
+packages = ["spyder_code_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

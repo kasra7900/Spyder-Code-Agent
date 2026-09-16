@@ -1,13 +1,12 @@
-from setuptools import setup, find_packages
+"""Compatibility shim for legacy ``setup.py`` installers.
 
-setup(
-    name="spyder-code-agent",
-    version="0.1.0",
-    packages=find_packages(),
-    entry_points={
-        "spyder.plugins": [
-            "code_agent = spyder_code_agent.plugin:CodeAgent"
-        ]
-    },
-    install_requires=["spyder>=6.0", "openai"],
-)
+Package metadata lives exclusively in ``pyproject.toml``. Keeping this tiny
+shim lets older tooling invoke ``python setup.py --name`` without reintroducing
+a second, divergent metadata definition.
+"""
+
+from setuptools import setup
+
+
+if __name__ == "__main__":
+    setup()

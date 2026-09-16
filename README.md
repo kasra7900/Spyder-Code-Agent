@@ -1,158 +1,171 @@
 # Spyder Code Agent
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![Spyder](https://img.shields.io/badge/Spyder-6.0%2B-red)
-![License](https://img.shields.io/badge/License-MIT-green)
+Spyder Code Agent is a Spyder dock plugin for Python debugging. It captures local IPython tracebacks, gives deterministic local guidance immediately, and can optionally ask an OpenAI-compatible endpoint for a structured patch. It is especially useful for Python, scikit-learn, PyTorch, and TensorFlow/Keras workflows—but it does not install or import any ML framework.
 
-**AI‑powered coding assistant for Spyder IDE** – automatically detects runtime errors in your Python/ML scripts and fixes them with one click.
+## Supported versions
 
-![Spyder Code Agent in action](img/demo.gif)
+- Python **3.9–3.13**
+- Spyder **6.0–6.1**
+- Windows, macOS, and Linux, with a local Spyder IPython kernel
 
-## Overview
+Spyder 5 and earlier are not supported because they use a different plugin API. Spyder 6.2+ and Python 3.14+ are intentionally rejected at startup until they are tested. A clear plugin-loader error states the detected unsupported version.
 
-Spyder Code Agent is a plugin that turns Spyder into a **self‑debugging IDE**. It listens to errors thrown in the IPython console, sends the relevant code (your selected files + current editor) to any OpenAI‑compatible LLM, and presents a ready‑to‑apply fix. No manual copy‑paste of tracebacks.
+## How installation works
 
-Perfect for **machine learning and data science** workflows where you frequently tweak code and run into `KeyError`, `ValueError`, shape mismatches, or missing imports.
+Spyder Code Agent consists of one Spyder dock plugin and an optional installer helper. They have different jobs:
 
-## ✨ Key Features
+| Component | What it does | When it is used |
+| --- | --- | --- |
+| `spyder-code-agent` | Adds the **Code Agent** pane to Spyder and provides diagnostics. | Every time Spyder runs. |
+| `tools/install_into_spyder.py` | Verifies the selected Python really hosts Spyder, installs the plugin there, and checks that Spyder can discover it. | Once during setup or after upgrading. |
 
-- **Automatic error capture** – Hooks into Spyder's IPython console; no need to type anything.
-- **Selective file context** – Choose exactly which `.py` files the agent can see (not your whole project).
-- **One‑click code replacement** – After the agent suggests a fix, click **Apply Fix** and the file is updated instantly.
-- **Works with any OpenAI‑compatible API** – Use OpenAI, local LLMs (via vLLM, Ollama, LM Studio), or any custom endpoint.
-- **Persistent API settings** – Base URL, API key, and model name are saved in `~/.agent_config`.
-- **Built for Spyder 6+** – Seamlessly docks into the IDE.
+Changing **Tools > Preferences > Python interpreter** in Spyder changes the Python environment used by an IPython kernel. It does **not** change the Python environment that runs Spyder's UI or loads dock plugins. This distinction matters because the Code Agent pane must be installed in the latter environment; ML/DL libraries can remain in the former.
 
-## 📋 Prerequisites
+### Standalone Spyder
 
-- **Spyder IDE** 6.0 or higher
-- **Python** 3.8+
-- An OpenAI‑compatible API endpoint and key (e.g., [OpenAI](https://platform.openai.com/), [Groq](https://groq.com/), [LocalAI](https://localai.io/), etc.)
+**Spyder Code Agent does not support the Spyder 6.0–6.1 standalone installer.** These standalone releases use an isolated runtime and do not provide a supported mechanism for installing third-party dock plugins. Installing this package in a project's Conda environment, venv, or the IPython console cannot make a pane appear in a separate standalone Spyder application.
 
-## ⚙️ Installation
+For full integration, install Spyder in a Conda environment or virtual environment and install this plugin in that same Spyder-host environment. A future standalone-compatible release is only feasible when Spyder provides a stable, supported third-party plugin manager; this project will evaluate it once it is available and tested.
 
-### From PyPI (recommended)
+For users who must keep a standalone Spyder installation, the planned alternative is a separate, environment-level diagnostic agent that can analyze tracebacks and files but does not add a native Spyder pane.
 
-```bash
-pip install spyder-code-agent
-```
+## Install
 
-### From source (for development)
+Install into the **same Python environment that launches the Spyder desktop application**. This is *not* necessarily the interpreter displayed by a connected IPython kernel. A kernel can be any project environment, but the pane and its `spyder.plugins` entry point are loaded only by Spyder's host process.
+
+> **Standalone Spyder limitation:** Spyder 6.0–6.1's standalone installer does not officially support third-party plugins. No Python package can make an entry point installed in a separate project environment appear in that standalone app. For third-party plugins, use a Conda or virtual-environment installation of Spyder. Spyder documents this limitation and is developing a plugin manager for 6.2.
 
 ```bash
-git clone https://github.com/kasra7900/Spyder-Code-Agent.git
-cd Spyder-Code-Agent
-pip install -e .
+# Recommended: create a dedicated environment, then install Spyder and the plugin.
+python -m venv .venv
+# Linux/macOS
+. .venv/bin/activate
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install "spyder-code-agent[spyder]"
+spyder
 ```
 
-## 🚀 Usage
+To enable an OpenAI-compatible provider, install the optional extra:
 
-### 1. First launch – API settings
-
-When you first open the Code Agent pane, it will automatically show the **API Settings** dialog:
-
-- **Base URL** – e.g., `https://api.openai.com/v1` or `http://localhost:1234/v1`
-- **API Key** – your secret key
-- **Model Name** – e.g., `Deepseek v3`, `gpt-4`, `llama3`, `codellama`
-
-Save the settings – they are stored in `~/.agent_config` and reused next time.
-
-> **Tip**: You can change these later by deleting the config file (`~/.agent_config`) and restarting Spyder – the dialog will appear again.
-
-### 2. Add files to the context
-
-Use the **+ Add file** button to select Python files (`.py`) that the agent should be allowed to read. These files will be included in every analysis.
-
-- You can add multiple files.
-- The plugin does **not** scan your whole project – only the files you explicitly add.
-
-### 3. Run your code as usual
-
-Write your ML script (e.g., data loading, model training) in the Spyder editor. Execute it in the IPython console.
-
-### 4. When an error occurs…
-
-The plugin captures the traceback automatically. It then:
-
-- Combines the error message + stack trace
-- Adds the content of all added files + the current editor content
-- Sends everything to the LLM
-
-Within seconds, the agent replies with:
-
-- **Error type** (e.g., `KeyError`, `IndexError`)
-- **Description** (plain English)
-- **Solution** (explanation + fixed code snippet)
-- **Fixed code** (the complete corrected file)
-
-### 5. Apply the fix
-
-If you see a fix you trust, click the **✅ Apply Fix** button. The plugin will:
-
-- Replace the target file (if the agent specified a filename) **or** the current editor content
-- Reload the file in Spyder automatically
-
-The error is resolved – no manual editing required.
-
-## 🔧 Example workflow
-
-Let’s say you have a script `train.py`:
-
-```python
-import pandas as pd
-df = pd.read_csv('data.csv')
-X = df.drop('target', axis=1)   # but the column is actually 'label'
+```bash
+python -m pip install "spyder-code-agent[openai]"
 ```
 
-Running this raises `KeyError: 'target'`. The agent sees the error, reads `train.py` (added to context), and suggests:
+For development from this checkout:
 
-```
-❌ KeyError
-Description: Column 'target' does not exist in the DataFrame.
-Solution: Change 'target' to the correct column name 'label'.
-Fixed code:
-   X = df.drop('label', axis=1)
+```bash
+python -m pip install --upgrade pip
+python -m pip install -e ".[spyder,openai,test]"
+spyder
 ```
 
-You click **Apply Fix** – the file is updated instantly.
+Restart Spyder after installation. The Code Agent pane is available from **View > Panes > Code Agent**. The plugin is registered through the `spyder.plugins` package entry point; no manual plugin copy is needed.
 
-## ⚙️ Under the hood
+### Existing Spyder installation
 
-- **Error hook**: The plugin injects a custom `showtraceback` function into the IPython shell. Every error is written to a temporary file (`~/.agent_last_error`) and picked up by a `QTimer`.
-- **LLM prompt**: The agent constructs a strict JSON prompt (error type, description, solution, fixed code, fixed file). The LLM must respond in that exact format.
-- **File modification**: When you click **Apply Fix**, the plugin writes the new content to the corresponding file path (or to the current editor if no file path is given). It creates no backup by default – be sure to use version control.
+First find the Python executable that launches Spyder. If you start Spyder from a terminal, use the interpreter in that same environment. With Conda, this is normally the environment you activated before running `spyder`.
 
-## 📄 Configuration
+Install the plugin with that exact executable:
 
-The plugin stores settings in `~/.agent_config` (JSON). Example:
-
-```json
-{
-  "base_url": "https://api.openai.com/v1",
-  "api_key": "sk-...",
-  "model_name": "gpt-4"
-}
+```bash
+/path/to/spyder-host-python -m pip install spyder-code-agent
+/path/to/spyder-host-python -m spyder_code_agent.doctor
 ```
 
-You can edit this file manually, but it’s easier to use the dialog that appears on first launch.
+For this source checkout, the helper verifies the chosen interpreter really contains Spyder, installs into it, and checks that Spyder can load the entry point:
 
-## 🤝 Contributing
+```bash
+python tools/install_into_spyder.py --spyder-python /path/to/spyder-host-python --editable
+```
 
-Issues and pull requests are welcome! To contribute:
+If the doctor says `Spyder is not installed in this environment`, you selected a project/kernel environment. Installing there can be useful for ML libraries used by the kernel, but it cannot add a UI pane to Spyder.
 
-1. Fork the repo.
-2. Create a feature branch.
-3. Install development dependencies: `pip install -e .`
-4. Test your changes in Spyder.
-5. Submit a PR.
+## Use
 
-## 📜 License
+1. Code Agent includes the open editor as `current_editor.py`. Use **+ Add file** to add only the other Python files you want to share as context.
+2. Run code in Spyder's local IPython console. A traceback triggers a local diagnosis automatically.
+3. Local diagnostics explain common imports, paths, keys, types, shape/broadcast errors, memory exhaustion, and device issues without any API key.
+4. For an optional LLM suggestion, use **Settings** to supply a base URL, API key, and model name for an OpenAI-compatible service, then send the traceback or question.
+5. Review the proposed patch. **Apply fix** only changes the open editor or exactly one selected context file whose basename matches the provider response. Selected filenames must be unique; it never follows absolute paths or `..` paths supplied by a model.
 
-MIT License. See `LICENSE` for details.
+Settings are stored outside the repository: `%APPDATA%\spyder-code-agent\settings.json` on Windows, or `$XDG_CONFIG_HOME/spyder-code-agent/settings.json` (normally `~/.config/...`) on macOS/Linux. On POSIX it is written with owner-only permissions. Do not commit this file, API keys, or provider URLs containing credentials. Existing `~/.agent_config` settings from earlier releases are read during upgrade and copied to the safer location the next time you save Settings.
 
----
+## ML and deep-learning assistance
 
-**Made with ❤️ for the data science and Machine Learning community**
+The agent detects scikit-learn, PyTorch, and TensorFlow/Keras clues in a traceback and adds framework-specific review guidance. It can help plan or review:
 
+- preprocessing and leakage-safe train/validation/test splits;
+- model boundaries, tensor/array shapes, dtypes, and labels;
+- training/evaluation loops, suitable metrics, and checkpointing;
+- deterministic seeds and experiment reproducibility;
+- GPU/device availability and CPU/GPU placement checks.
 
+These frameworks remain optional: install them in the Spyder kernel environment only when your project needs them. The plugin does not claim a model provider exists until its optional client is installed and Settings are complete.
 
+## Architecture
+
+- `spyder_code_agent.plugin`: the small Spyder 6 registration adapter.
+- `spyder_code_agent.container`: Qt UI, explicit context selection, guarded IPython traceback hook, and patch application.
+- `spyder_code_agent.diagnostics`: dependency-free traceback categorization and ML/DL guidance.
+- `spyder_code_agent.agent`: provider-neutral prompt/response logic, strict response parsing, and a lazy OpenAI-compatible provider.
+- `spyder_code_agent.compatibility`: Python/Spyder range checks with actionable errors.
+
+The traceback hook is installed once per local kernel and writes a unique temporary JSON file that the dock widget polls. Remote kernels or kernels on another machine cannot use this local-file transport; paste the traceback into the pane instead.
+
+## Project status and roadmap
+
+### Available now
+
+- [x] Spyder 6 dock plugin with host-environment installation checks.
+- [x] Automatic local-IPython traceback capture and dependency-free Python diagnostics.
+- [x] Optional OpenAI-compatible provider with structured, validated responses.
+- [x] Safe patches for the active editor and explicitly selected context files.
+- [x] ML/DL guidance for scikit-learn, PyTorch, and TensorFlow/Keras errors.
+
+### Building toward a Spyder-native code agent
+
+The current release is a debugging assistant, not a replacement for Codex or OpenCode. The following work will turn it into a tool-using agent while keeping user control over code and files:
+
+- [ ] Add a project-scoped tool loop for listing files, reading files, and searching code.
+- [ ] Show a short agent plan and live tool activity in the Spyder pane.
+- [ ] Generate reviewable, multi-file diffs instead of applying opaque file replacements.
+- [ ] Add explicit approvals before file writes, code execution, or test runs.
+- [ ] Run selected tests in the configured Spyder kernel and summarize failures.
+- [ ] Add ML/DL environment tools for GPU, CUDA, framework versions, tensor shapes, and training-loop checks.
+- [ ] Add evaluation fixtures for debugging quality, tool safety, and regression testing.
+
+The agent will remain project-scoped by default. It will not read files outside the approved project context, execute system commands, or modify files without a visible request and user confirmation.
+
+## Troubleshooting
+
+| Symptom | Resolution |
+| --- | --- |
+| Code Agent pane is missing | Run `/path/to/spyder-host-python -m spyder_code_agent.doctor`. If it reports a missing entry point, reinstall with that exact interpreter, then restart Spyder. |
+| Spyder was installed with the standalone installer | Spyder 6.0–6.1 does not support installing third-party plugins there. Install Spyder in Conda/venv instead; a separate project environment cannot add the pane to the standalone app. |
+| Plugin says the Spyder/Python version is unsupported | Use Python 3.9–3.13 and `spyder>=6.0,<6.2`; do not force-install across that boundary. |
+| `OpenAI support is optional and is not installed` | Run `python -m pip install "spyder-code-agent[openai]"` in Spyder's environment. |
+| `ModuleNotFoundError` in your code | Compare `sys.executable` in Spyder with the interpreter used for `pip install`. |
+| No automatic traceback capture | Confirm the code ran in a local Spyder IPython console; remote kernels require pasting the traceback. |
+| Patch will not apply | Add the target file explicitly, ensure its basename is unique among selected files, then review/retry. |
+
+## Development and verification
+
+```bash
+python -m pip install -e ".[spyder,test]"
+python -m pytest
+python -m ruff check spyder_code_agent tests
+python -m build
+```
+
+The test suite covers clean core import, metadata/entry-point declarations, version checks, traceback/ML diagnostics, provider response safety, and mocked Spyder plugin loading. Test real Spyder versions in isolated Python 3.9–3.13 environments before publishing.
+
+## Publishing
+
+1. Update the version in `pyproject.toml` and `spyder_code_agent/__init__.py` together.
+2. Run the commands above in a clean virtual environment.
+3. Inspect `dist/`, then upload with `python -m twine upload dist/*` using trusted publishing or a token stored outside this repository.
+
+## License
+
+MIT License. See [LICENSE](LICENSE).
