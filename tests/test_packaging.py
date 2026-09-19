@@ -2,7 +2,6 @@ from pathlib import Path
 
 import spyder_code_agent
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 

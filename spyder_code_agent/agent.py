@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
-from pathlib import PurePath, PureWindowsPath
 import re
-from typing import Mapping, Optional, Protocol
+from dataclasses import dataclass
+from pathlib import PurePath, PureWindowsPath
+from typing import Mapping, Optional, Protocol, Tuple
 
 from .diagnostics import DiagnosticReport, diagnose_traceback, project_guidance
 
@@ -19,6 +19,24 @@ class AgentResponseError(ValueError):
     """Raised when a provider response cannot be safely interpreted."""
 
 
+def provider_error_message(error: Exception) -> str:
+    """Turn common provider failures into actionable, secret-free UI text."""
+    status = getattr(error, "status_code", None)
+    text = str(error).lower()
+    if status == 429:
+        return "The model provider is rate-limiting requests (429). Wait briefly, then try Send again. No file was changed."
+    if status in {401, 403}:
+        return "The model provider rejected the API credentials (401/403). Check Settings; no file was changed."
+    if status == 404:
+        return "The configured model or API endpoint was not found (404). Check the model name and base URL in Settings."
+    if (isinstance(status, int) and 500 <= status < 600) or "5xx" in text:
+        return (
+            "The model provider returned a temporary server error (5xx). Try Send again; if it repeats, "
+            "choose another available model or check the provider status. No file was changed."
+        )
+    return "The model provider request failed. Check the endpoint, model, and network connection; no file was changed."
+
+
 @dataclass(frozen=True)
 class AgentSuggestion:
     error_type: str = ""
@@ -28,6 +46,7 @@ class AgentSuggestion:
     example: str = ""
     fixed_file: str = ""
     fixed_code: str = ""
+    patches: Tuple[Mapping[str, object], ...] = ()
 
 
 class Provider(Protocol):
@@ -49,13 +68,10 @@ def _safe_relative_filename(value: object) -> str:
         or windows_path.root
         or ".." in path.parts
         or ".." in windows_path.parts
-        or len(path.parts) > 1
-        or len(windows_path.parts) > 1
-        or cleaned != path.name
-        or cleaned != windows_path.name
+        or "\\" in cleaned
     ):
         return ""
-    return path.name
+    return cleaned
 
 
 def parse_suggestion(payload: str) -> AgentSuggestion:
@@ -75,6 +91,15 @@ def parse_suggestion(payload: str) -> AgentSuggestion:
         value = data.get(key, "")
         return value if isinstance(value, str) else str(value)
 
+    # ``patches`` was added after the original single-file response schema.
+    # Treat an omitted (or explicit null) field as an empty list so legacy
+    # ``fixed_file`` / ``fixed_code`` responses continue to parse.
+    patches = data.get("patches", [])
+    if patches is None:
+        patches = []
+    if not isinstance(patches, list) or not all(isinstance(item, Mapping) for item in patches):
+        raise AgentResponseError("The provider returned malformed patch proposal data; no patch was accepted.")
+
     return AgentSuggestion(
         error_type=string("error_type"),
         description=string("description"),
@@ -83,6 +108,7 @@ def parse_suggestion(payload: str) -> AgentSuggestion:
         example=string("example"),
         fixed_file=_safe_relative_filename(data.get("fixed_file")),
         fixed_code=string("fixed_code"),
+        patches=tuple(dict(item) for item in patches),
     )
 
 
@@ -94,9 +120,12 @@ def build_prompt(user_request: str, context_code: str, report: DiagnosticReport)
     return "\n".join(
         [
             "You are a careful Python debugging assistant embedded in Spyder.",
-            "Return ONLY a JSON object with error_type, description, evidence, solution, example, fixed_file, fixed_code.",
-            "Do not invent files. fixed_file must be the basename of one supplied context file, or an empty string. "
-            "When the supplied context file is current_editor.py, that exact name means the open editor only, never a disk path.",
+            "Return ONLY a JSON object with error_type, description, evidence, solution, example, fixed_file, fixed_code, patches.",
+            "Do not invent files. fixed_file must identify one supplied context file using a safe project-relative path, "
+            "or be empty. When the supplied context file is current_editor.py, that exact name means the open editor only, never a disk path.",
+            "For coordinated edits, use patches as an array of {file, content} full replacements. Each file must be "
+            "current_editor.py or a safe project-relative supplied context file. Never include both patches and "
+            "legacy fixed_file/fixed_code in one response.",
             "Do not include credentials, API keys, or secrets in code or explanations.",
             f"Local diagnosis: {report.error_type}: {report.summary}",
             "Local debugging steps: " + " | ".join(report.debugging_steps),
@@ -149,21 +178,24 @@ class OpenAICompatibleProvider:
                 "OpenAI support is optional and is not installed. Run `pip install spyder-code-agent[openai]`."
             ) from error
         client = OpenAI(base_url=self.base_url, api_key=self.api_key)
-        response = client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a safe debugging agent. Follow the exact JSON protocol in the user message. "
-                        "Return one JSON object only, with no Markdown or prose outside that object."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
+        try:
+            response = client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a safe debugging agent. Follow the exact JSON protocol in the user message. "
+                            "Return one JSON object only, with no Markdown or prose outside that object."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                response_format={"type": "json_object"},
+            )
+        except Exception as error:
+            raise AgentResponseError(provider_error_message(error)) from error
         content = response.choices[0].message.content
         if not content:
             raise AgentResponseError("The provider returned an empty response.")

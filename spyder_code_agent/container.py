@@ -6,21 +6,22 @@ Python process and does not require an API client at import time.
 
 from __future__ import annotations
 
-from html import escape
 import json
 import os
-from pathlib import Path
 import tempfile
 import uuid
+from html import escape
+from pathlib import Path
 
 from qtpy.QtCore import QThread, QTimer, Signal
 from qtpy.QtWidgets import (
+    QCheckBox,
     QDialog,
-    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTextBrowser,
     QTextEdit,
@@ -38,10 +39,9 @@ from .agent import (
 )
 from .agent_loop import AgentActivity, AgentLoop, AgentRun
 from .diagnostics import is_traceback_text
-from .project_context import CURRENT_EDITOR_NAME, ProjectContext, is_sensitive_name
+from .patch_review import PatchReviewService, PatchValidationError
+from .project_context import CURRENT_EDITOR_NAME, ProjectContext
 
-
-MAX_CONTEXT_CHARS = 120_000
 CURRENT_EDITOR_CONTEXT_FILE = CURRENT_EDITOR_NAME
 
 
@@ -148,6 +148,12 @@ class AgentContainer(PluginMainWidget):
         self.pending_fix_file = ""
         self.pending_fix_editor = None
         self._request_editor = None
+        self._request_context = None
+        self._request_originals = {}
+        self._request_project_paths = {}
+        self.patch_review_service = None
+        self.patch_proposal = None
+        self.patch_checkboxes = {}
         self.projects = None
         self.load_setting_from_file()
 
@@ -173,7 +179,6 @@ class AgentContainer(PluginMainWidget):
 
     def setup(self):
         self.conversation_history = []
-        self.selected_files = []
         self.chat_display = QTextBrowser()
         self.chat_display.setOpenExternalLinks(False)
         self.context_scope = QLabel()
@@ -181,16 +186,18 @@ class AgentContainer(PluginMainWidget):
         self.plan_display.setMaximumHeight(70)
         self.activity_display = QTextBrowser()
         self.activity_display.setMaximumHeight(120)
+        self.patch_proposal_label = QLabel("Patch proposal")
+        self.patch_proposal_panel = QWidget()
+        self.patch_proposal_layout = QVBoxLayout()
+        self.patch_proposal_panel.setLayout(self.patch_proposal_layout)
         self.user_input = QTextEdit()
         self.user_input.setMaximumHeight(90)
 
-        self.add_file_btn = QPushButton("+ Add file")
-        self.add_file_btn.clicked.connect(self.add_file)
         self.settings_btn = QPushButton("Settings")
         self.settings_btn.clicked.connect(self.set_api)
         self.send_btn = QPushButton("Send")
         self.send_btn.clicked.connect(self.send_message)
-        self.apply_btn = QPushButton("Apply fix")
+        self.apply_btn = QPushButton("Apply selected patches")
         self.apply_btn.clicked.connect(self.apply_fix)
         self.apply_btn.setEnabled(False)
 
@@ -202,11 +209,12 @@ class AgentContainer(PluginMainWidget):
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Context scope"))
         layout.addWidget(self.context_scope)
-        layout.addWidget(self.add_file_btn)
         layout.addWidget(QLabel("Agent plan"))
         layout.addWidget(self.plan_display)
         layout.addWidget(QLabel("Tool activity"))
         layout.addWidget(self.activity_display)
+        layout.addWidget(self.patch_proposal_label)
+        layout.addWidget(self.patch_proposal_panel)
         layout.addWidget(self.chat_display)
         layout.addWidget(self.user_input)
         layout.addLayout(buttons)
@@ -214,6 +222,7 @@ class AgentContainer(PluginMainWidget):
         central.setLayout(layout)
         self.setLayout(QVBoxLayout())
         self.layout().addWidget(central)
+        self._set_patch_review_visible(False)
         self.update_context_scope()
 
     def load_setting_from_file(self):
@@ -263,36 +272,6 @@ class AgentContainer(PluginMainWidget):
         message = "API settings saved." if self.save_settings_to_file() else "API settings could not be saved."
         self.chat_display.append(f"<b>System:</b> {escape(message)}")
 
-    def add_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select file", "", "Python files (*.py);;All files (*)")
-        if not path or path in self.selected_files:
-            return
-        filename = Path(path).name
-        if filename == CURRENT_EDITOR_CONTEXT_FILE:
-            self.show_error(f"{filename} is reserved for the open editor context.")
-            return
-        if is_sensitive_name(filename):
-            self.show_error(f"{filename} was not added because sensitive files cannot be shared with the agent.")
-            return
-        if any(Path(selected).name == filename for selected in self.selected_files):
-            self.show_error(
-                f"{filename} was not added because selected context filenames must be unique."
-            )
-            return
-        self.selected_files.append(path)
-        self.chat_display.append(f"<b>Context added:</b> <code>{escape(filename)}</code>")
-        self.update_context_scope()
-
-    def get_project_files(self):
-        result = {}
-        for raw_path in self.selected_files:
-            path = Path(raw_path)
-            try:
-                result[path.name] = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as error:
-                self.show_error(f"Could not read {path.name}: {error}")
-        return result
-
     def get_current_file_content(self):
         current_editor = self._get_current_editor()
         if current_editor is None:
@@ -310,24 +289,6 @@ class AgentContainer(PluginMainWidget):
             return self.editor.get_current_editor()
         except (AttributeError, RuntimeError):
             return None
-
-    def _context_string(self):
-        context = self.get_project_files()
-        # This sentinel is intentionally not a real path. It lets the provider
-        # request a patch for the open editor while preserving the rule that
-        # model output can never choose an arbitrary disk path. Keep it in the
-        # context even when extra files are selected: those files are often
-        # dependencies of the code presently being debugged.
-        self._request_editor = self._get_current_editor()
-        if self._request_editor is not None:
-            context = {
-                CURRENT_EDITOR_CONTEXT_FILE: self.get_current_file_content(),
-                **context,
-            }
-        rendered = "\n\n".join(f"# FILE: {name}\n{code}" for name, code in context.items())
-        if len(rendered) > MAX_CONTEXT_CHARS:
-            self.chat_display.append("<b>System:</b> Context was truncated to protect the provider request size.")
-        return rendered[:MAX_CONTEXT_CHARS]
 
     def _active_project_root(self):
         """Read a root only from Spyder Projects; never fall back to cwd/home."""
@@ -354,20 +315,25 @@ class AgentContainer(PluginMainWidget):
         if not hasattr(self, "context_scope"):
             return
         root = self._active_project_root()
-        project = f"Project: {escape(root.name)}" if root is not None else "No active project (selected context only)"
+        project = f"Project: {escape(root.name)}" if root is not None else "No active Spyder project"
         editor = "active editor available" if self._get_current_editor() is not None else "no active editor"
-        selected = ", ".join(escape(Path(path).name) for path in self.selected_files) or "none"
-        self.context_scope.setText(f"{project} · {editor} · selected: {selected}")
+        access = "safe project files available on request" if root is not None else "project files unavailable"
+        self.context_scope.setText(f"{project} · {editor} · {access}")
 
     def _project_context(self):
         self._request_editor = self._get_current_editor()
-        return ProjectContext(
+        active_content = self.get_current_file_content()
+        self._request_project_paths = {}
+        self._request_originals = {}
+        if self._request_editor is not None:
+            self._request_originals[CURRENT_EDITOR_CONTEXT_FILE] = active_content
+        self._request_context = ProjectContext(
             project_root=self._active_project_root(),
-            active_editor_text=self.get_current_file_content(),
+            active_editor_text=active_content,
             active_editor_name=CURRENT_EDITOR_CONTEXT_FILE,
             active_editor_available=self._request_editor is not None,
-            selected_context=self.get_project_files(),
         )
+        return self._request_context
 
     def inject_error_handler(self, shell=None):
         """Install one guarded traceback hook per kernel and start one polling timer."""
@@ -470,6 +436,16 @@ if not getattr(_agent_ipython, "_spyder_code_agent_traceback_hook", False):
         if not isinstance(result, AgentRun):
             self.show_error("Provider returned an invalid agent result.")
             return
+        if self._request_context is not None:
+            # Project files become eligible for a patch only after the agent
+            # used the read-only tool to inspect them in this exact request.
+            # Store the local source snapshots and resolved, project-contained
+            # paths for the later stale check and user-approved write.
+            for name, content in result.file_snapshots.items():
+                path = self._request_context.approved_project_file(name)
+                if path is not None:
+                    self._request_originals[name] = content
+                    self._request_project_paths[name] = path
         self.activity_display.append(
             f"<span style='color:#444'>Agent completed {result.tool_calls} read-only tool call(s).</span>"
         )
@@ -485,12 +461,22 @@ if not getattr(_agent_ipython, "_spyder_code_agent_traceback_hook", False):
         self._render_suggestion(suggestion)
 
     def _render_suggestion(self, suggestion):
-        self.pending_fix = suggestion.fixed_code or None
-        self.pending_fix_file = suggestion.fixed_file
-        self.pending_fix_editor = (
-            self._request_editor if suggestion.fixed_file == CURRENT_EDITOR_CONTEXT_FILE else None
-        )
-        self.apply_btn.setEnabled(bool(self.pending_fix))
+        self._clear_patch_review()
+        if self._request_context is None:
+            self._project_context()
+        try:
+            self.patch_review_service = PatchReviewService(self._request_context, self._request_originals)
+            self.patch_proposal = self.patch_review_service.create_proposal(
+                suggestion.patches, suggestion.fixed_file, suggestion.fixed_code
+            )
+        except PatchValidationError as error:
+            self.patch_review_service = None
+            self.patch_proposal = None
+            self.show_error(f"Patch proposal was rejected: {error}")
+        self.pending_fix = None
+        self.pending_fix_file = ""
+        self.pending_fix_editor = None
+        self.apply_btn.setEnabled(bool(self.patch_proposal and self.patch_proposal.files))
         parts = []
         if suggestion.error_type:
             parts.append(f"<b>Agent: {escape(suggestion.error_type)}</b><br>{escape(suggestion.description)}")
@@ -502,47 +488,116 @@ if not getattr(_agent_ipython, "_spyder_code_agent_traceback_hook", False):
             parts.append(f"<b>Suggested approach:</b><br>{escape(suggestion.solution).replace(chr(10), '<br>')}")
         if suggestion.example:
             parts.append(f"<pre>{escape(suggestion.example)}</pre>")
-        if self.pending_fix:
-            target = (
-                "the current editor"
-                if suggestion.fixed_file == CURRENT_EDITOR_CONTEXT_FILE
-                else suggestion.fixed_file or "the current editor"
+        if self.patch_proposal and self.patch_proposal.files:
+            self._render_patch_review()
+            parts.append(
+                "<b>Patch proposal ready.</b> Review each local diff, select the files you approve, then click "
+                "Apply selected patches. Nothing is written until confirmation."
             )
-            parts.append(f"<b>Patch ready for:</b> {escape(target)}. Review it, then click Apply fix.")
         self.chat_display.append("<hr>".join(parts) or "<b>Agent:</b> No structured advice returned.")
 
     def apply_fix(self):
-        if not self.pending_fix:
+        if not self.patch_proposal or not self.patch_review_service:
             return
+        approved = [target for target, checkbox in self.patch_checkboxes.items() if checkbox.isChecked()]
+        if not approved:
+            self.show_error("Select at least one reviewed patch before applying it.")
+            return
+        count = len(approved)
+        confirmation = QMessageBox.question(
+            self,
+            "Approve project file changes",
+            "Allow Code Agent to replace exactly these reviewed file"
+            f"{'s' if count != 1 else ''}?\n\n"
+            + "\n".join(f"• {target}" for target in approved)
+            + "\n\nOnly these checked diffs will be written. This cannot be undone here.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirmation != QMessageBox.Yes:
+            return
+        current = self._current_patch_contents()
+        results = self.patch_review_service.apply_selected(
+            self.patch_proposal, approved, current, self._apply_patch_file
+        )
+        self._report_patch_results(results)
+        self._clear_patch_review()
+
+    def _current_patch_contents(self):
+        current = {}
+        for patch in self.patch_proposal.files:
+            if patch.target == CURRENT_EDITOR_CONTEXT_FILE:
+                try:
+                    current[patch.target] = self._request_editor.toPlainText()
+                except (AttributeError, RuntimeError):
+                    current[patch.target] = None
+            else:
+                path = self._request_project_paths.get(patch.target)
+                try:
+                    current[patch.target] = path.read_text(encoding="utf-8") if path is not None else None
+                except (OSError, UnicodeError):
+                    current[patch.target] = None
+        return current
+
+    def _apply_patch_file(self, patch):
         try:
-            if self.pending_fix_file == CURRENT_EDITOR_CONTEXT_FILE:
-                if self.pending_fix_editor is None:
+            if patch.target == CURRENT_EDITOR_CONTEXT_FILE:
+                if self._request_editor is None:
                     raise ValueError(
                         "The editor used for this suggestion is no longer available; no file was changed."
                     )
-                self.pending_fix_editor.set_text(self.pending_fix)
-            elif self.pending_fix_file:
-                candidates = [Path(path) for path in self.selected_files if Path(path).name == self.pending_fix_file]
-                if len(candidates) != 1:
-                    raise ValueError("The suggested file is not a uniquely selected context file; no file was changed.")
-                target = candidates[0]
-                temporary = target.with_name(f".{target.name}.spyder-code-agent.tmp")
-                temporary.write_text(self.pending_fix, encoding="utf-8")
-                os.replace(temporary, target)
-                if self.editor is not None:
-                    self.editor.load(str(target))
+                self._request_editor.set_text(patch.proposed_content)
             else:
-                if self.editor is None:
-                    raise ValueError("No active Spyder editor is available for this patch.")
-                self.editor.get_current_editor().set_text(self.pending_fix)
-        except (OSError, ValueError, AttributeError) as error:
-            self.show_error(f"Patch was not applied: {error}")
-            return
-        self.pending_fix = None
-        self.pending_fix_file = ""
-        self.pending_fix_editor = None
-        self.apply_btn.setEnabled(False)
-        self.chat_display.append("<b>Fix applied.</b> Review and run the changed code before keeping it.")
+                target = self._request_project_paths.get(patch.target)
+                if target is None:
+                    raise ValueError("The suggested project file was not read in this request; no file was changed.")
+                PatchReviewService.atomic_write(target, patch.proposed_content)
+                if self.editor is not None:
+                    try:
+                        self.editor.load(str(target))
+                    except (AttributeError, RuntimeError):
+                        pass
+        except (OSError, ValueError, AttributeError):
+            raise
+
+    def _render_patch_review(self):
+        for patch in self.patch_proposal.files:
+            checkbox = QCheckBox(f"Approve {patch.target}")
+            checkbox.setChecked(False)
+            self.patch_checkboxes[patch.target] = checkbox
+            diff = QTextBrowser()
+            diff.setPlainText(patch.diff)
+            diff.setMaximumHeight(180)
+            self.patch_proposal_layout.addWidget(checkbox)
+            self.patch_proposal_layout.addWidget(diff)
+        self._set_patch_review_visible(True)
+
+    def _clear_patch_review(self):
+        if hasattr(self, "patch_proposal_layout"):
+            while self.patch_proposal_layout.count():
+                item = self.patch_proposal_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+        self.patch_checkboxes = {}
+        self.patch_proposal = None
+        self.patch_review_service = None
+        if hasattr(self, "apply_btn"):
+            self.apply_btn.setEnabled(False)
+        self._set_patch_review_visible(False)
+
+    def _set_patch_review_visible(self, visible):
+        if hasattr(self, "patch_proposal_label"):
+            self.patch_proposal_label.setVisible(visible)
+        if hasattr(self, "patch_proposal_panel"):
+            self.patch_proposal_panel.setVisible(visible)
+
+    def _report_patch_results(self, results):
+        lines = []
+        for result in results:
+            target = escape(result.target or "Patch proposal")
+            lines.append(f"<b>{escape(result.status.title())}:</b> {target} — {escape(result.message)}")
+        self.chat_display.append("<br>".join(lines))
 
     def show_error(self, message):
         self.chat_display.append(f"<b style='color:#b00020'>Code Agent error:</b> {escape(str(message))}")

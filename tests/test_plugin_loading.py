@@ -44,8 +44,8 @@ def _install_fake_spyder_and_qt(monkeypatch):
     qtcore.Signal = _Signal
     qtwidgets = types.ModuleType("qtpy.QtWidgets")
     for name in (
-        "QAction", "QDialog", "QFileDialog", "QFormLayout", "QHBoxLayout", "QLabel", "QLineEdit",
-        "QPushButton", "QTextBrowser", "QTextEdit", "QVBoxLayout", "QWidget",
+        "QAction", "QCheckBox", "QDialog", "QFileDialog", "QFormLayout", "QHBoxLayout", "QLabel",
+        "QLineEdit", "QMessageBox", "QPushButton", "QTextBrowser", "QTextEdit", "QVBoxLayout", "QWidget",
     ):
         setattr(qtwidgets, name, _QtObject)
     for name, module in {

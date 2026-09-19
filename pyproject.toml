@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,14 +8,14 @@ version = "0.2.0"
 description = "A diagnostic and optional AI-assistance plugin for Spyder"
 readme = "README.md"
 requires-python = ">=3.9,<3.14"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "Amir", email = "mohammadamirdehghanian@gmail.com"}]
 keywords = ["spyder", "plugin", "debugging", "machine-learning", "deep-learning"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Plugins",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -58,4 +58,5 @@ target-version = "py39"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "B"]
+ignore = ["E501"]

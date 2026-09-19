@@ -1,10 +1,11 @@
 import importlib
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
 
 from spyder_code_agent.agent_tools import (
+    CANONICAL_TOOL_DICTIONARY,
     MAX_LIST_RESULTS,
     MAX_READ_BYTES,
     MAX_SEARCH_RESULTS,
@@ -37,6 +38,20 @@ def test_active_editor_uses_a_logical_name_and_redacts_obvious_tokens():
     assert "keep-this-private" not in result.data["content"]
 
 
+def test_read_project_file_current_editor_sentinel_uses_open_editor_not_disk(tmp_path):
+    (tmp_path / CURRENT_EDITOR_NAME).write_text("disk value\n", encoding="utf-8")
+    registry = ToolRegistry(
+        ProjectContext(project_root=tmp_path, active_editor_available=True, active_editor_text="editor value\n")
+    )
+
+    result = registry.execute("read_project_file", {"path": CURRENT_EDITOR_NAME})
+
+    assert result.ok
+    assert result.data["content"] == "editor value\n"
+    assert result.data["source"] == "active_editor"
+    assert registry.read_snapshots == {}
+
+
 def test_project_file_tools_reject_traversal_and_require_a_prior_listing(tmp_path):
     (tmp_path / "main.py").write_text("value = 1\n", encoding="utf-8")
     registry = ToolRegistry(ProjectContext(project_root=tmp_path))
@@ -58,10 +73,23 @@ def test_common_model_tool_aliases_keep_canonical_tool_restrictions(tmp_path):
 
     assert canonical_tool_name("read_file") == "read_project_file"
     assert canonical_tool_name("search_code") == "search_project"
+    assert canonical_tool_name("search_in_files") == "search_project"
+    assert canonical_tool_name("search_project_files") == "search_project"
+    assert set(CANONICAL_TOOL_DICTIONARY) == {
+        "get_active_editor",
+        "list_project_files",
+        "read_project_file",
+        "search_project",
+        "get_runtime_info",
+        "diagnose_traceback",
+    }
+    assert canonical_tool_name("read_active_editor") == "get_active_editor"
     assert not canonical_tool_name("shell")
     assert registry.execute("list_files", {}).ok
     assert registry.execute("read_file", {"filename": "main.py"}).data["content"] == "value = convert(1)\n"
     assert registry.execute("search_code", {"pattern": "convert"}).ok
+    assert registry.execute("search_project", {"query": "convert", "metadata": "ignored"}).ok
+    assert registry.execute("search_project", {"search_query": {"text": "convert"}}).ok
     assert not registry.execute("read_file", {"path": "../outside.py"}).ok
 
 
@@ -153,17 +181,22 @@ def test_invalid_query_and_no_project_are_clear_and_do_not_search_cwd(tmp_path):
     assert not relative_root.ok
 
 
-def test_selected_context_and_patch_targets_are_explicit_only():
-    context = ProjectContext(
-        active_editor_text="print('open')",
-        selected_context={"helpers.py": "token: hidden\n", "settings.json": "do not share"},
-    )
-    selected = ToolRegistry(context).execute("get_selected_context", {})
+def test_project_patch_targets_are_safe_existing_project_files(tmp_path):
+    (tmp_path / "helpers.py").write_text("print('helper')\n", encoding="utf-8")
+    (tmp_path / "settings.json").write_text('{"key": "secret"}\n', encoding="utf-8")
+    context = ProjectContext(project_root=tmp_path, active_editor_text="print('open')")
 
-    assert selected.ok
-    assert selected.data["files"][0]["name"] == "helpers.py"
-    assert "hidden" not in selected.data["files"][0]["content"]
     assert context.patch_target_is_approved(CURRENT_EDITOR_NAME)
     assert context.patch_target_is_approved("helpers.py")
     assert not context.patch_target_is_approved("other.py")
     assert not context.patch_target_is_approved("settings.json")
+
+
+def test_read_project_file_keeps_a_local_snapshot_for_reviewable_patches(tmp_path):
+    (tmp_path / "helpers.py").write_text("print('helper')\n", encoding="utf-8")
+    registry = ToolRegistry(ProjectContext(project_root=tmp_path))
+
+    registry.execute("list_project_files", {})
+    registry.execute("read_project_file", {"path": "helpers.py"})
+
+    assert registry.read_snapshots == {"helpers.py": "print('helper')\n"}

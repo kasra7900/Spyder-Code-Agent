@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import importlib.util
 import os
-from pathlib import Path, PurePosixPath, PureWindowsPath
 import platform
-import sys
+from dataclasses import asdict, dataclass
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, Iterable, Mapping, Optional, Set
 
 from .diagnostics import diagnose_traceback
-from .project_context import ProjectContext, is_sensitive_name, redact_sensitive_text
-
+from .project_context import (
+    CURRENT_EDITOR_NAME,
+    ProjectContext,
+    is_sensitive_name,
+    redact_sensitive_text,
+)
 
 MAX_LIST_RESULTS = 100
 MAX_LIST_FILE_BYTES = 512_000
@@ -33,8 +36,7 @@ _IGNORED_DIRECTORIES = {
 _SOURCE_SUFFIXES = {".py", ".pyi", ".pyx", ".md", ".rst", ".txt", ".toml", ".yaml", ".yml", ".json"}
 
 TOOL_SPECS = {
-    "get_active_editor": "Read the open editor using its logical name only. Arguments: {}.",
-    "get_selected_context": "Read files explicitly added by the user. Arguments: {}.",
+    "get_active_editor": "Read the open editor. Use this for current_editor.py; it is not a project filesystem path. Arguments: {}.",
     "list_project_files": "List up to 100 safe, relevant project-relative files. Arguments: {}.",
     "read_project_file": "Read a previously listed project-relative file. Arguments: {\"path\": \"src/x.py\"}.",
     "search_project": "Literal text search in safe project source files. Arguments: {\"query\": \"symbol\"}.",
@@ -42,21 +44,47 @@ TOOL_SPECS = {
     "diagnose_traceback": "Run local deterministic traceback diagnostics. Arguments: {\"traceback\": \"...\"}.",
 }
 
+# This small schema is shown verbatim to providers. Keep it separate from the
+# longer descriptions above so models can copy exact names and argument keys.
+CANONICAL_TOOL_DICTIONARY = {
+    "get_active_editor": {},
+    "list_project_files": {},
+    "read_project_file": {"path": "project-relative path returned by search/list"},
+    "search_project": {"query": "literal text to find"},
+    "get_runtime_info": {},
+    "diagnose_traceback": {"traceback": "traceback text"},
+}
+
 # Models often use these generic names despite being told the canonical names.
 # Aliases are deliberately few and map only to tools with identical, already
 # validated read-only semantics; they never add a capability.
 TOOL_ALIASES = {
     "get_editor": "get_active_editor",
+    "read_active_editor": "get_active_editor",
+    "read_current_editor": "get_active_editor",
     "list_files": "list_project_files",
+    "list_project": "list_project_files",
     "read_file": "read_project_file",
     "search_code": "search_project",
     "search_files": "search_project",
+    "search_in_files": "search_project",
+    "search_project_files": "search_project",
+    "find_in_files": "search_project",
+    "grep": "search_project",
     "get_runtime": "get_runtime_info",
 }
 
 _ARGUMENT_ALIASES = {
     "read_project_file": {"file": "path", "file_path": "path", "filename": "path"},
-    "search_project": {"pattern": "query", "text": "query", "term": "query", "search_term": "query"},
+    "search_project": {
+        "pattern": "query",
+        "text": "query",
+        "term": "query",
+        "search_term": "query",
+        "search_query": "query",
+        "keyword": "query",
+        "q": "query",
+    },
     "diagnose_traceback": {"error": "traceback", "trace": "traceback"},
 }
 
@@ -69,20 +97,29 @@ def canonical_tool_name(value: object) -> str:
 
 
 def canonical_tool_arguments(name: object, value: object) -> object:
-    """Accept one common argument spelling without relaxing tool schemas.
+    """Normalize harmless argument-envelope variations before validation.
 
-    Only a single known alias key is translated. Extra keys and every unknown
-    schema remain visible to the normal validators and are rejected there.
+    Only the one supported value for a tool is retained. Extra gateway
+    metadata never reaches a tool and therefore cannot increase capability.
     """
     canonical_name = canonical_tool_name(name)
     if not canonical_name or not isinstance(value, Mapping):
         return value
+    if canonical_name in {"get_active_editor", "list_project_files", "get_runtime_info"}:
+        return {}
     aliases = _ARGUMENT_ALIASES.get(canonical_name, {})
-    if len(value) == 1:
-        supplied_key = next(iter(value))
-        canonical_key = aliases.get(supplied_key)
-        if canonical_key:
-            return {canonical_key: value[supplied_key]}
+    expected_key = {"read_project_file": "path", "search_project": "query", "diagnose_traceback": "traceback"}.get(
+        canonical_name
+    )
+    if expected_key is None:
+        return value
+    accepted_keys = (expected_key, *aliases)
+    for supplied_key in accepted_keys:
+        supplied_value = value.get(supplied_key)
+        if isinstance(supplied_value, Mapping):
+            supplied_value = supplied_value.get("text", supplied_value.get("value"))
+        if isinstance(supplied_value, str):
+            return {expected_key: supplied_value}
     return value
 
 
@@ -157,7 +194,28 @@ class ToolRegistry:
     def __init__(self, context: ProjectContext) -> None:
         self.context = context
         self._listed_files: Set[str] = set()
+        self._search_match_paths: Set[str] = set()
+        self._search_queries: Set[str] = set()
+        # Full source snapshots stay local. They are used only for the
+        # reviewable patch's stale-content check; the provider receives the
+        # redacted result below.
+        self._read_snapshots: Dict[str, str] = {}
         self._scan_truncated = False
+
+    @property
+    def read_snapshots(self) -> Dict[str, str]:
+        """Return copies of files explicitly read through the safe tool."""
+        return dict(self._read_snapshots)
+
+    @property
+    def search_match_paths(self) -> Set[str]:
+        """Return paths surfaced by project searches during this request."""
+        return set(self._search_match_paths)
+
+    @property
+    def search_queries(self) -> Set[str]:
+        """Return normalized literal searches completed during this request."""
+        return set(self._search_queries)
 
     def execute(self, name: object, arguments: object) -> ToolResult:
         name = canonical_tool_name(name)
@@ -179,7 +237,6 @@ class ToolRegistry:
             return "Tool arguments must be a JSON object."
         validators = {
             "get_active_editor": self._empty_arguments,
-            "get_selected_context": self._empty_arguments,
             "list_project_files": self._empty_arguments,
             "get_runtime_info": self._empty_arguments,
             "read_project_file": self._path_arguments,
@@ -272,9 +329,6 @@ class ToolRegistry:
     def _get_active_editor(self, arguments: Mapping[str, object]) -> ToolResult:
         return ToolResult("get_active_editor", True, self.context.active_editor())
 
-    def _get_selected_context(self, arguments: Mapping[str, object]) -> ToolResult:
-        return ToolResult("get_selected_context", True, self.context.selected_files())
-
     def _list_project_files(self, arguments: Mapping[str, object]) -> ToolResult:
         unavailable = self._root_or_unavailable("list_project_files")
         if unavailable:
@@ -298,6 +352,25 @@ class ToolRegistry:
         )
 
     def _read_project_file(self, arguments: Mapping[str, object]) -> ToolResult:
+        # Some providers naturally treat the logical editor name as a project
+        # path. Keep the sentinel out of the filesystem while serving the same
+        # redacted, read-only editor content instead of wasting a tool call.
+        if arguments["path"] == CURRENT_EDITOR_NAME:
+            editor = self.context.active_editor()
+            if not editor["available"]:
+                return ToolResult(
+                    "read_project_file", False, {}, "No active editor is available for current_editor.py."
+                )
+            return ToolResult(
+                "read_project_file",
+                True,
+                {
+                    "path": CURRENT_EDITOR_NAME,
+                    "content": editor["content"],
+                    "truncated": editor["truncated"],
+                    "source": "active_editor",
+                },
+            )
         unavailable = self._root_or_unavailable("read_project_file")
         if unavailable:
             return unavailable
@@ -318,6 +391,7 @@ class ToolRegistry:
         content = _read_text(resolved, MAX_READ_BYTES)
         if content is None:
             return ToolResult("read_project_file", False, {}, "File is binary, unreadable, or exceeds the read limit.")
+        self._read_snapshots[name] = content
         return ToolResult("read_project_file", True, {"path": name, "content": redact_sensitive_text(content)})
 
     def _search_project(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -325,6 +399,7 @@ class ToolRegistry:
         if unavailable:
             return unavailable
         query = arguments["query"].strip()
+        self._search_queries.add(query)
         root = self.context.normalized_project_root()
         matches, examined, total_bytes = [], 0, 0
         for relative, resolved in self._safe_project_files(root):
@@ -347,6 +422,7 @@ class ToolRegistry:
                     # list entry, so the agent may inspect that exact safe file
                     # in the next read-only step without a redundant listing.
                     self._listed_files.add(relative.as_posix())
+                    self._search_match_paths.add(relative.as_posix())
                     matches.append(
                         {
                             "path": relative.as_posix(),

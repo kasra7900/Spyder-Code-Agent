@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
 import sys
+from dataclasses import dataclass
 from typing import Optional, Tuple
-
 
 MIN_PYTHON = (3, 9)
 MAX_PYTHON_EXCLUSIVE = (3, 14)

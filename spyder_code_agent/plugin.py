@@ -16,7 +16,9 @@ from .compatibility import require_supported_runtime
 
 require_supported_runtime(spyder.__version__)
 
-from .container import AgentContainer
+# This intentionally follows the runtime check above, so an unsupported
+# Spyder version fails before importing Qt-dependent plugin code.
+from .container import AgentContainer  # noqa: E402
 
 
 class CodeAgent(SpyderDockablePlugin):

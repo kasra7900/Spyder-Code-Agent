@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path, PurePath, PureWindowsPath
 import re
-from typing import Dict, Mapping, Optional
-
+from dataclasses import dataclass
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from typing import Dict, Optional
 
 CURRENT_EDITOR_NAME = "current_editor.py"
 MAX_EDITOR_CHARS = 60_000
-MAX_SELECTED_FILES = 12
-MAX_SELECTED_FILE_CHARS = 40_000
-MAX_SELECTED_TOTAL_CHARS = 120_000
+
+# Project-wide access is intentionally limited to ordinary source and
+# documentation files. These match the files exposed by the read-only tool
+# registry; credentials, hidden metadata, environments, and generated output
+# never become patch targets.
+_SAFE_PROJECT_SUFFIXES = {".py", ".pyi", ".pyx", ".md", ".rst", ".txt", ".toml", ".yaml", ".yml", ".json"}
+_IGNORED_PROJECT_PARTS = {
+    ".git", ".hg", ".svn", ".venv", "venv", "env", "__pycache__", "build", "dist",
+    "node_modules", ".tox", ".nox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+}
 
 _SENSITIVE_NAME = re.compile(
     r"(^|[._-])(env|secret|secrets|credential|credentials|token|tokens|private|apikey|api_key|settings|"
@@ -75,6 +81,34 @@ def safe_logical_name(value: str, fallback: str = CURRENT_EDITOR_NAME) -> str:
     return windows_path.name if "\\" in value else candidate
 
 
+def safe_project_relative_path(value: object) -> Optional[Path]:
+    """Validate one portable, non-sensitive path relative to a project root."""
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        return None
+    raw = value.strip()
+    posix = PurePosixPath(raw)
+    windows = PureWindowsPath(raw)
+    if (
+        raw != value
+        or "\\" in raw
+        or posix.is_absolute()
+        or windows.is_absolute()
+        or windows.drive
+        or windows.root
+        or ".." in posix.parts
+        or ".." in windows.parts
+    ):
+        return None
+    parts = tuple(part for part in posix.parts if part not in {"", "."})
+    if not parts or any(
+        part.startswith(".") or part.lower() in _IGNORED_PROJECT_PARTS or is_sensitive_name(part)
+        for part in parts
+    ):
+        return None
+    relative = Path(*parts)
+    return relative if relative.suffix.lower() in _SAFE_PROJECT_SUFFIXES else None
+
+
 @dataclass(frozen=True)
 class ProjectContext:
     """Data approved by the user/Spyder adapter for a single agent request.
@@ -87,7 +121,6 @@ class ProjectContext:
     active_editor_text: str = ""
     active_editor_name: str = CURRENT_EDITOR_NAME
     active_editor_available: Optional[bool] = None
-    selected_context: Mapping[str, str] = field(default_factory=dict)
 
     def normalized_project_root(self) -> Optional[Path]:
         if self.project_root is None:
@@ -109,30 +142,6 @@ class ProjectContext:
             "truncated": len(self.active_editor_text or "") > MAX_EDITOR_CHARS,
         }
 
-    def selected_files(self) -> Dict[str, object]:
-        """Return bounded explicit context, without paths and with redaction."""
-        files = []
-        total = 0
-        for supplied_name, content in self.selected_context.items():
-            if len(files) >= MAX_SELECTED_FILES:
-                break
-            name = safe_logical_name(supplied_name, fallback="selected_context.py")
-            if is_sensitive_name(name) or not isinstance(content, str):
-                continue
-            remaining = max(MAX_SELECTED_TOTAL_CHARS - total, 0)
-            if not remaining:
-                break
-            limited = content[: min(MAX_SELECTED_FILE_CHARS, remaining)]
-            files.append(
-                {
-                    "name": name,
-                    "content": redact_sensitive_text(limited),
-                    "truncated": len(content) > len(limited),
-                }
-            )
-            total += len(limited)
-        return {"available": bool(files), "files": files, "truncated": len(files) < len(self.selected_context)}
-
     @property
     def has_active_editor(self) -> bool:
         """Whether Spyder supplied an editor, including an intentionally blank one."""
@@ -140,22 +149,29 @@ class ProjectContext:
             return self.active_editor_available
         return bool(self.active_editor_text)
 
-    def patch_target_is_approved(self, filename: object) -> bool:
-        """Whether a provider may propose a patch for this logical target.
+    def approved_project_file(self, filename: object) -> Optional[Path]:
+        """Resolve an existing safe project file, without following it outside.
 
-        This is deliberately name-based: the Qt adapter retains the editor
-        object and the explicitly selected paths, and is the only layer that
-        can perform the user-triggered write.
+        The caller receives the resolved path only after a user-approved
+        project root and the source-file policy have both been verified.
         """
+        relative = safe_project_relative_path(filename)
+        root = self.normalized_project_root()
+        if relative is None or root is None:
+            return None
+        candidate = root / relative
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return None
+        return resolved if resolved.is_file() and not resolved.is_symlink() else None
+
+    def patch_target_is_approved(self, filename: object) -> bool:
+        """Whether a provider may propose a patch for the active project."""
         if filename == CURRENT_EDITOR_NAME:
             return self.has_active_editor
-        if not isinstance(filename, str) or is_sensitive_name(filename):
-            return False
-        approved = set()
-        for name, content in self.selected_context.items():
-            if len(approved) >= MAX_SELECTED_FILES:
-                break
-            logical_name = safe_logical_name(name, fallback="selected_context.py")
-            if isinstance(content, str) and not is_sensitive_name(logical_name):
-                approved.add(logical_name)
-        return filename in approved
+        return self.approved_project_file(filename) is not None

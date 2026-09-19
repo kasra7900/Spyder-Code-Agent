@@ -72,6 +72,70 @@ def test_agent_loop_maps_common_read_file_alias_to_the_safe_project_tool(tmp_pat
     assert result.tool_calls == 2
     assert result.activities[1].tool == "search_project"
     assert result.activities[2].tool == "read_project_file"
+    assert "def convert(value)" in provider.prompts[-1]
+
+
+def test_agent_loop_ignores_non_actionable_gateway_metadata(tmp_path):
+    (tmp_path / "model.py").write_text("VALUE = 1\n", encoding="utf-8")
+    provider = SequenceProvider(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "plan": "Inspect project files.",
+                    "tool_call": {"tool": "list_project_files", "arguments": {}},
+                    "provider_metadata": {"trace": "ignored"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "tool": "get_runtime_info",
+                    "arguments": {},
+                    "reasoning": "ignored",
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "final",
+                    "answer": {"description": "Project files and runtime were inspected.", "confidence": 0.8},
+                    "usage": {"output_tokens": 20},
+                }
+            ),
+        ]
+    )
+
+    result = AgentLoop(provider, ProjectContext(project_root=tmp_path)).run("debug this")
+
+    assert result.tool_calls == 2
+    assert result.suggestion.description == "Project files and runtime were inspected."
+
+
+def test_agent_loop_normalizes_common_function_call_gateway_envelopes(tmp_path):
+    (tmp_path / "model.py").write_text("VALUE = 1\n", encoding="utf-8")
+    provider = SequenceProvider(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "plan": "Inspect the project.",
+                    "tool_call": {"name": "list_project_files", "parameters": "{}"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "function_call",
+                    "function": {"name": "get_runtime_info", "arguments": "{}"},
+                }
+            ),
+            json.dumps({"answer": {"description": "Gateway envelopes were normalized."}}),
+        ]
+    )
+
+    result = AgentLoop(provider, ProjectContext(project_root=tmp_path)).run("debug this")
+
+    assert result.tool_calls == 2
+    assert result.suggestion.description == "Gateway envelopes were normalized."
 
 
 @pytest.mark.parametrize(
@@ -148,6 +212,7 @@ def test_agent_loop_can_request_a_final_answer_when_the_tool_budget_is_reached()
 
     assert result.tool_calls == 1
     assert "tool-call limit (1) was reached" in provider.prompts[-1]
+    assert "python_version" in provider.prompts[-1]
 
 
 def test_agent_loop_reports_no_project_as_limited_context_not_a_filesystem_fallback():
@@ -160,7 +225,7 @@ def test_agent_loop_reports_no_project_as_limited_context_not_a_filesystem_fallb
                     "tool_call": {"tool": "list_project_files", "arguments": {}},
                 }
             ),
-            _final(description="Only selected context is available."),
+            _final(description="Only active-editor and runtime context is available."),
         ]
     )
 
@@ -172,7 +237,63 @@ def test_agent_loop_reports_no_project_as_limited_context_not_a_filesystem_fallb
     assert "project_available" in provider.prompts[1]
 
 
-def test_agent_loop_rejects_patch_outside_current_or_selected_context():
+def test_agent_loop_requires_project_search_before_a_function_import_conclusion(tmp_path):
+    (tmp_path / "test.py").write_text("def convert(value):\n    return value\n", encoding="utf-8")
+    provider = SequenceProvider(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "plan": "Inspect the open editor first.",
+                    "tool_call": {"tool": "get_active_editor", "arguments": {}},
+                }
+            ),
+            _final(description="No convert function was found in the editor."),
+            json.dumps({"type": "tool_call", "tool": "search_project", "arguments": {"query": "convert"}}),
+            _final(description="convert is defined in test.py."),
+        ]
+    )
+
+    result = AgentLoop(
+        provider, ProjectContext(project_root=tmp_path, active_editor_available=True, active_editor_text="data = {}")
+    ).run("Inspect convert and every direct caller/importer before proposing a patch.")
+
+    assert result.tool_calls == 2
+    assert "must first call search_project" in provider.prompts[2]
+    assert result.suggestion.description == "convert is defined in test.py."
+
+
+def test_agent_loop_requires_reads_of_files_named_by_the_user(tmp_path):
+    (tmp_path / "test.py").write_text("def convert(value):\n    return value\n", encoding="utf-8")
+    (tmp_path / "1.py").write_text("print('caller')\n", encoding="utf-8")
+    provider = SequenceProvider(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "plan": "List the project before reviewing imports.",
+                    "tool_call": {"tool": "list_project_files", "arguments": {}},
+                }
+            ),
+            _final(description="No import change is needed."),
+            json.dumps({"type": "tool_call", "tool": "read_project_file", "arguments": {"path": "test.py"}}),
+            _final(description="Only test.py was inspected."),
+            json.dumps({"type": "tool_call", "tool": "read_project_file", "arguments": {"path": "1.py"}}),
+            _final(description="Both named files were inspected."),
+        ]
+    )
+
+    result = AgentLoop(provider, ProjectContext(project_root=tmp_path)).run(
+        "Import convert from test.py into 1.py."
+    )
+
+    assert result.tool_calls == 3
+    assert "explicitly named these project files" in provider.prompts[2]
+    assert "1.py" in provider.prompts[4]
+    assert result.suggestion.description == "Both named files were inspected."
+
+
+def test_agent_loop_rejects_patch_outside_active_project():
     provider = SequenceProvider(
         [
             json.dumps({"type": "plan", "plan": "Explain the error."}),
@@ -184,16 +305,24 @@ def test_agent_loop_rejects_patch_outside_current_or_selected_context():
         AgentLoop(provider, ProjectContext()).run("debug this")
 
 
-def test_agent_loop_accepts_current_editor_and_selected_file_patches():
+def test_agent_loop_accepts_current_editor_and_previously_read_project_file_patch(tmp_path):
+    (tmp_path / "helpers.py").write_text("print('old')\n", encoding="utf-8")
     editor_provider = SequenceProvider(
         [
             json.dumps({"type": "plan", "plan": "Fix the open file."}),
             _final(fixed_file=CURRENT_EDITOR_NAME, fixed_code="print('fixed')"),
         ]
     )
-    selected_provider = SequenceProvider(
+    project_provider = SequenceProvider(
         [
-            json.dumps({"type": "plan", "plan": "Fix the selected file."}),
+            json.dumps(
+                {
+                    "type": "plan",
+                    "plan": "Find and inspect the helper before proposing a fix.",
+                    "tool_call": {"tool": "search_project", "arguments": {"query": "old"}},
+                }
+            ),
+            json.dumps({"type": "tool_call", "tool": "read_project_file", "arguments": {"path": "helpers.py"}}),
             _final(fixed_file="helpers.py", fixed_code="print('fixed')"),
         ]
     )
@@ -202,5 +331,89 @@ def test_agent_loop_accepts_current_editor_and_selected_file_patches():
         editor_provider, ProjectContext(active_editor_available=True)
     ).run("debug").suggestion.fixed_code
     assert AgentLoop(
-        selected_provider, ProjectContext(selected_context={"helpers.py": "print('old')"})
+        project_provider, ProjectContext(project_root=tmp_path)
     ).run("debug").suggestion.fixed_file == "helpers.py"
+
+
+def test_agent_loop_accepts_previously_read_project_patch_targets(tmp_path):
+    (tmp_path / "helpers.py").write_text("print('helper')\n", encoding="utf-8")
+    (tmp_path / "other.py").write_text("print('other')\n", encoding="utf-8")
+    provider = SequenceProvider(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "plan": "Find and inspect both files before proposing coordinated edits.",
+                    "tool_call": {"tool": "search_project", "arguments": {"query": "print"}},
+                }
+            ),
+            json.dumps({"type": "tool_call", "tool": "read_project_file", "arguments": {"path": "helpers.py"}}),
+            json.dumps({"type": "tool_call", "tool": "read_project_file", "arguments": {"path": "other.py"}}),
+            _final(
+                patches=[
+                    {"file": CURRENT_EDITOR_NAME, "content": "print('editor')"},
+                    {"file": "helpers.py", "content": "print('helper')"},
+                ]
+            ),
+        ]
+    )
+    context = ProjectContext(project_root=tmp_path, active_editor_available=True)
+
+    result = AgentLoop(provider, context).run("debug")
+
+    assert len(result.suggestion.patches) == 2
+
+
+def test_agent_loop_audits_unread_search_call_sites_before_accepting_a_patch(tmp_path):
+    (tmp_path / "test.py").write_text(
+        "def convert(value):\n    return value['name']\n", encoding="utf-8"
+    )
+    (tmp_path / "1.py").write_text(
+        "from test import convert\nprint(convert({'name': 'Ada'}))\n", encoding="utf-8"
+    )
+    provider = SequenceProvider(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "plan": "Find convert and inspect its callers before proposing a safe change.",
+                    "tool_call": {"tool": "search_project", "arguments": {"query": "convert"}},
+                }
+            ),
+            json.dumps({"type": "tool_call", "tool": "read_project_file", "arguments": {"path": "test.py"}}),
+            _final(
+                patches=[
+                    {"file": "test.py", "content": "def convert(value):\n    return '' if value is None else value['name']\n"}
+                ]
+            ),
+            json.dumps({"type": "tool_call", "tool": "read_project_file", "arguments": {"path": "1.py"}}),
+            _final(
+                patches=[
+                    {"file": "test.py", "content": "def convert(value):\n    return '' if value is None else value['name']\n"},
+                    {"file": "1.py", "content": "from test import convert\nprint(convert({'name': 'Ada'}))\n"},
+                ]
+            ),
+        ]
+    )
+
+    result = AgentLoop(provider, ProjectContext(project_root=tmp_path)).run(
+        "Update all files needed for convert to handle None safely."
+    )
+
+    assert result.tool_calls == 3
+    assert result.suggestion.patches[-1]["file"] == "1.py"
+    assert "patch-completeness review" in provider.prompts[3]
+    assert "Earlier patch draft" in provider.prompts[4]
+
+
+def test_agent_loop_rejects_a_project_patch_that_was_not_read(tmp_path):
+    (tmp_path / "unselected.py").write_text("print('old')\n", encoding="utf-8")
+    provider = SequenceProvider(
+        [
+            json.dumps({"type": "plan", "plan": "Propose an edit."}),
+            _final(patches=[{"file": "unselected.py", "content": "print('no')"}]),
+        ]
+    )
+
+    with pytest.raises(AgentProtocolError, match="did not read"):
+        AgentLoop(provider, ProjectContext(project_root=tmp_path)).run("debug")

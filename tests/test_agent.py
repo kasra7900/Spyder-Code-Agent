@@ -5,6 +5,7 @@ from spyder_code_agent.agent import (
     AgentResponseError,
     AgentService,
     parse_suggestion,
+    provider_error_message,
 )
 
 
@@ -54,6 +55,35 @@ def test_parser_keeps_the_current_editor_sentinel_as_a_safe_filename():
     assert suggestion.fixed_file == "current_editor.py"
 
 
+def test_parser_preserves_a_safe_project_relative_patch_path():
+    suggestion = parse_suggestion('{"fixed_file":"src/helpers.py","fixed_code":"print(5)"}')
+
+    assert suggestion.fixed_file == "src/helpers.py"
+
+
+def test_parser_preserves_structured_multi_file_patches_and_rejects_malformed_data():
+    suggestion = parse_suggestion(
+        '{"patches":[{"file":"current_editor.py","content":"print(1)"},'
+        '{"file":"helpers.py","content":"print(2)"}]}'
+    )
+
+    assert [patch["file"] for patch in suggestion.patches] == ["current_editor.py", "helpers.py"]
+    with pytest.raises(AgentResponseError, match="malformed patch"):
+        parse_suggestion('{"patches":"not an array"}')
+
+
 def test_no_provider_has_actionable_error():
     with pytest.raises(AgentConfigurationError, match="No model provider"):
         AgentService().ask("KeyError: x", "")
+
+
+class _ProviderFailure(Exception):
+    def __init__(self, message, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def test_provider_errors_are_actionable_without_exposing_request_details():
+    assert "temporary server error" in provider_error_message(_ProviderFailure("5xx json"))
+    assert "rate-limiting" in provider_error_message(_ProviderFailure("busy", 429))
+    assert "credentials" in provider_error_message(_ProviderFailure("denied", 401))

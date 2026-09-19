@@ -10,7 +10,6 @@ import importlib
 import sys
 from importlib import metadata
 
-
 ENTRY_POINT_GROUP = "spyder.plugins"
 ENTRY_POINT_NAME = "code_agent"
 
