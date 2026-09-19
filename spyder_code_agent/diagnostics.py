@@ -19,6 +19,17 @@ class DiagnosticReport:
 _ERROR_LINE = re.compile(r"^([A-Za-z_][\w.]*?(?:Error|Exception|Warning))(?::\s*(.*))?$", re.M)
 
 
+def is_traceback_text(value: str) -> bool:
+    """Return whether text contains a traceback or a standalone exception line.
+
+    Normal agent questions must not be presented as failed Python executions in
+    the UI. A copied one-line exception (for example ``KeyError: 'name'``) is
+    still a useful input for deterministic diagnosis.
+    """
+    text = value or ""
+    return "Traceback (most recent call last):" in text or bool(_ERROR_LINE.search(text))
+
+
 def _frameworks(text: str) -> List[str]:
     lower = text.lower()
     found = []

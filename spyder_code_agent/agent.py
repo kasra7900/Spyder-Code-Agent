@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from pathlib import PurePath
+from pathlib import PurePath, PureWindowsPath
 import re
 from typing import Mapping, Optional, Protocol
 
@@ -23,6 +23,7 @@ class AgentResponseError(ValueError):
 class AgentSuggestion:
     error_type: str = ""
     description: str = ""
+    evidence: str = ""
     solution: str = ""
     example: str = ""
     fixed_file: str = ""
@@ -37,8 +38,22 @@ class Provider(Protocol):
 def _safe_relative_filename(value: object) -> str:
     if not isinstance(value, str):
         return ""
-    path = PurePath(value.strip())
-    if not value.strip() or path.is_absolute() or ".." in path.parts or len(path.parts) > 1:
+    cleaned = value.strip()
+    path = PurePath(cleaned)
+    windows_path = PureWindowsPath(cleaned)
+    if (
+        not cleaned
+        or path.is_absolute()
+        or windows_path.is_absolute()
+        or windows_path.drive
+        or windows_path.root
+        or ".." in path.parts
+        or ".." in windows_path.parts
+        or len(path.parts) > 1
+        or len(windows_path.parts) > 1
+        or cleaned != path.name
+        or cleaned != windows_path.name
+    ):
         return ""
     return path.name
 
@@ -63,6 +78,7 @@ def parse_suggestion(payload: str) -> AgentSuggestion:
     return AgentSuggestion(
         error_type=string("error_type"),
         description=string("description"),
+        evidence=string("evidence"),
         solution=string("solution"),
         example=string("example"),
         fixed_file=_safe_relative_filename(data.get("fixed_file")),
@@ -78,7 +94,7 @@ def build_prompt(user_request: str, context_code: str, report: DiagnosticReport)
     return "\n".join(
         [
             "You are a careful Python debugging assistant embedded in Spyder.",
-            "Return ONLY a JSON object with error_type, description, solution, example, fixed_file, fixed_code.",
+            "Return ONLY a JSON object with error_type, description, evidence, solution, example, fixed_file, fixed_code.",
             "Do not invent files. fixed_file must be the basename of one supplied context file, or an empty string. "
             "When the supplied context file is current_editor.py, that exact name means the open editor only, never a disk path.",
             "Do not include credentials, API keys, or secrets in code or explanations.",
@@ -136,7 +152,13 @@ class OpenAICompatibleProvider:
         response = client.chat.completions.create(
             model=self.model_name,
             messages=[
-                {"role": "system", "content": "You return safe, structured debugging assistance."},
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a safe debugging agent. Follow the exact JSON protocol in the user message. "
+                        "Return one JSON object only, with no Markdown or prose outside that object."
+                    ),
+                },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,

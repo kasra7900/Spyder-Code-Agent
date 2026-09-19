@@ -1,6 +1,6 @@
 # Spyder Code Agent
 
-Spyder Code Agent is a Spyder dock plugin for Python debugging. It captures local IPython tracebacks, gives deterministic local guidance immediately, and can optionally ask an OpenAI-compatible endpoint for a structured patch. It is especially useful for Python, scikit-learn, PyTorch, and TensorFlow/Keras workflows—but it does not install or import any ML framework.
+Spyder Code Agent is a Spyder dock plugin for Python debugging. It captures local IPython tracebacks, gives deterministic local guidance immediately, and can optionally ask an OpenAI-compatible endpoint for a bounded, read-only debugging investigation and a structured patch. It is especially useful for Python, scikit-learn, PyTorch, and TensorFlow/Keras workflows—but it does not install or import any ML framework.
 
 ## Supported versions
 
@@ -83,13 +83,21 @@ If the doctor says `Spyder is not installed in this environment`, you selected a
 
 ## Use
 
-1. Code Agent includes the open editor as `current_editor.py`. Use **+ Add file** to add only the other Python files you want to share as context.
+1. Code Agent includes the open editor as `current_editor.py`. Use **+ Add file** to add only the other files you explicitly want to share as context. Sensitive filenames such as `.env`, credentials, private keys, and settings files are refused.
 2. Run code in Spyder's local IPython console. A traceback triggers a local diagnosis automatically.
 3. Local diagnostics explain common imports, paths, keys, types, shape/broadcast errors, memory exhaustion, and device issues without any API key.
-4. For an optional LLM suggestion, use **Settings** to supply a base URL, API key, and model name for an OpenAI-compatible service, then send the traceback or question.
+4. For an optional LLM investigation, use **Settings** to supply a base URL, API key, and model name for an OpenAI-compatible service, then send the traceback or question. The pane shows the model's short plan and each read-only tool activity.
 5. Review the proposed patch. **Apply fix** only changes the open editor or exactly one selected context file whose basename matches the provider response. Selected filenames must be unique; it never follows absolute paths or `..` paths supplied by a model.
 
 Settings are stored outside the repository: `%APPDATA%\spyder-code-agent\settings.json` on Windows, or `$XDG_CONFIG_HOME/spyder-code-agent/settings.json` (normally `~/.config/...`) on macOS/Linux. On POSIX it is written with owner-only permissions. Do not commit this file, API keys, or provider URLs containing credentials. Existing `~/.agent_config` settings from earlier releases are read during upgrade and copied to the safer location the next time you save Settings.
+
+### Project-scoped debugging agent (Phase 1)
+
+When Spyder has an active project, the optional provider can make at most six validated, read-only requests in one debugging session. It can inspect the active editor, explicitly selected context, safe runtime availability, deterministic traceback diagnosis, and a bounded set of safe project files. Project reads and searches are confined to Spyder's active project root; traversal, absolute paths, symlinks escaping that root, binary/oversized files, virtual environments, build output, caches, Git metadata, and likely secret files are blocked.
+
+When no Spyder project is open, the pane clearly reports the limited-context state. The agent may still inspect the active editor, explicitly selected files, runtime information, and local traceback diagnosis, but cannot list, search, or read arbitrary filesystem paths.
+
+This phase cannot run shell commands, execute code or tests, install packages, make arbitrary network requests, index unrestricted directories, or write files. **Apply fix** remains an existing, visible, user-triggered action and is limited to the current editor or exactly one explicitly selected file after review. The agent itself has no write tool and cannot apply multi-file patches.
 
 ## ML and deep-learning assistance
 
@@ -109,6 +117,9 @@ These frameworks remain optional: install them in the Spyder kernel environment 
 - `spyder_code_agent.container`: Qt UI, explicit context selection, guarded IPython traceback hook, and patch application.
 - `spyder_code_agent.diagnostics`: dependency-free traceback categorization and ML/DL guidance.
 - `spyder_code_agent.agent`: provider-neutral prompt/response logic, strict response parsing, and a lazy OpenAI-compatible provider.
+- `spyder_code_agent.project_context`: framework-independent, redacted active-editor, selected-context, and approved-project state.
+- `spyder_code_agent.agent_tools`: allowlisted, bounded read-only project and runtime tools.
+- `spyder_code_agent.agent_loop`: provider-neutral structured plan/tool/final-response loop with a six-call maximum.
 - `spyder_code_agent.compatibility`: Python/Spyder range checks with actionable errors.
 
 The traceback hook is installed once per local kernel and writes a unique temporary JSON file that the dock widget polls. Remote kernels or kernels on another machine cannot use this local-file transport; paste the traceback into the pane instead.
@@ -122,13 +133,12 @@ The traceback hook is installed once per local kernel and writes a unique tempor
 - [x] Optional OpenAI-compatible provider with structured, validated responses.
 - [x] Safe patches for the active editor and explicitly selected context files.
 - [x] ML/DL guidance for scikit-learn, PyTorch, and TensorFlow/Keras errors.
+- [x] Phase 1 project-scoped, read-only tool loop with plan and activity display.
 
 ### Building toward a Spyder-native code agent
 
 The current release is a debugging assistant, not a replacement for Codex or OpenCode. The following work will turn it into a tool-using agent while keeping user control over code and files:
 
-- [ ] Add a project-scoped tool loop for listing files, reading files, and searching code.
-- [ ] Show a short agent plan and live tool activity in the Spyder pane.
 - [ ] Generate reviewable, multi-file diffs instead of applying opaque file replacements.
 - [ ] Add explicit approvals before file writes, code execution, or test runs.
 - [ ] Run selected tests in the configured Spyder kernel and summarize failures.

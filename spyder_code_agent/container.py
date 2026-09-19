@@ -36,10 +36,13 @@ from .agent import (
     OpenAICompatibleProvider,
     parse_suggestion,
 )
+from .agent_loop import AgentActivity, AgentLoop, AgentRun
+from .diagnostics import is_traceback_text
+from .project_context import CURRENT_EDITOR_NAME, ProjectContext, is_sensitive_name
 
 
 MAX_CONTEXT_CHARS = 120_000
-CURRENT_EDITOR_CONTEXT_FILE = "current_editor.py"
+CURRENT_EDITOR_CONTEXT_FILE = CURRENT_EDITOR_NAME
 
 
 def _settings_file() -> Path:
@@ -95,16 +98,17 @@ class APIDialog(QDialog):
 
 
 class LLMWorker(QThread):
-    """Run the optional network provider off the Qt UI thread."""
+    """Run the optional provider and read-only agent loop off the Qt UI thread."""
 
-    text_received = Signal(str)
+    result_received = Signal(object)
+    activity_received = Signal(object)
     error_occurred = Signal(str)
     finished_response = Signal()
 
-    def __init__(self, prompt, base_url, api_key, model_name, context_code=""):
+    def __init__(self, prompt, base_url, api_key, model_name, project_context):
         super().__init__()
         self.prompt = prompt
-        self.context_code = context_code
+        self.project_context = project_context
         self.base_url = base_url
         self.api_key = api_key
         self.model_name = model_name
@@ -112,8 +116,10 @@ class LLMWorker(QThread):
     def run(self):
         try:
             provider = OpenAICompatibleProvider(self.base_url, self.api_key, self.model_name)
-            response = provider.complete(AgentService().prepare(self.prompt, self.context_code))
-            self.text_received.emit(response)
+            result = AgentLoop(provider, self.project_context).run(
+                self.prompt, on_activity=self.activity_received.emit
+            )
+            self.result_received.emit(result)
         except (AgentConfigurationError, AgentResponseError) as error:
             self.error_occurred.emit(str(error))
         except Exception as error:  # Provider/network exceptions need a visible UI message.
@@ -142,6 +148,7 @@ class AgentContainer(PluginMainWidget):
         self.pending_fix_file = ""
         self.pending_fix_editor = None
         self._request_editor = None
+        self.projects = None
         self.load_setting_from_file()
 
     def get_title(self):
@@ -160,14 +167,20 @@ class AgentContainer(PluginMainWidget):
         self.editor = editor
 
     def set_projects(self, projects):
-        # Retained for Spyder's optional Projects integration. File selection remains explicit.
+        # The adapter obtains a root only from this optional Spyder plugin.
         self.projects = projects
+        self.update_context_scope()
 
     def setup(self):
         self.conversation_history = []
         self.selected_files = []
         self.chat_display = QTextBrowser()
         self.chat_display.setOpenExternalLinks(False)
+        self.context_scope = QLabel()
+        self.plan_display = QTextBrowser()
+        self.plan_display.setMaximumHeight(70)
+        self.activity_display = QTextBrowser()
+        self.activity_display.setMaximumHeight(120)
         self.user_input = QTextEdit()
         self.user_input.setMaximumHeight(90)
 
@@ -187,7 +200,13 @@ class AgentContainer(PluginMainWidget):
         buttons.addStretch()
         buttons.addWidget(self.apply_btn)
         layout = QVBoxLayout()
+        layout.addWidget(QLabel("Context scope"))
+        layout.addWidget(self.context_scope)
         layout.addWidget(self.add_file_btn)
+        layout.addWidget(QLabel("Agent plan"))
+        layout.addWidget(self.plan_display)
+        layout.addWidget(QLabel("Tool activity"))
+        layout.addWidget(self.activity_display)
         layout.addWidget(self.chat_display)
         layout.addWidget(self.user_input)
         layout.addLayout(buttons)
@@ -195,6 +214,7 @@ class AgentContainer(PluginMainWidget):
         central.setLayout(layout)
         self.setLayout(QVBoxLayout())
         self.layout().addWidget(central)
+        self.update_context_scope()
 
     def load_setting_from_file(self):
         # Read the legacy location once so upgrades do not discard existing settings.
@@ -251,6 +271,9 @@ class AgentContainer(PluginMainWidget):
         if filename == CURRENT_EDITOR_CONTEXT_FILE:
             self.show_error(f"{filename} is reserved for the open editor context.")
             return
+        if is_sensitive_name(filename):
+            self.show_error(f"{filename} was not added because sensitive files cannot be shared with the agent.")
+            return
         if any(Path(selected).name == filename for selected in self.selected_files):
             self.show_error(
                 f"{filename} was not added because selected context filenames must be unique."
@@ -258,6 +281,7 @@ class AgentContainer(PluginMainWidget):
             return
         self.selected_files.append(path)
         self.chat_display.append(f"<b>Context added:</b> <code>{escape(filename)}</code>")
+        self.update_context_scope()
 
     def get_project_files(self):
         result = {}
@@ -304,6 +328,46 @@ class AgentContainer(PluginMainWidget):
         if len(rendered) > MAX_CONTEXT_CHARS:
             self.chat_display.append("<b>System:</b> Context was truncated to protect the provider request size.")
         return rendered[:MAX_CONTEXT_CHARS]
+
+    def _active_project_root(self):
+        """Read a root only from Spyder Projects; never fall back to cwd/home."""
+        if self.projects is None:
+            return None
+        candidates = []
+        for method_name in ("get_active_project_path", "get_project_path", "get_active_project"):
+            method = getattr(self.projects, method_name, None)
+            if callable(method):
+                try:
+                    candidates.append(method())
+                except (AttributeError, RuntimeError, TypeError):
+                    continue
+        for candidate in candidates:
+            root = getattr(candidate, "root_path", candidate)
+            if isinstance(root, (str, Path)):
+                path = Path(root)
+                if path.is_absolute() and path.is_dir():
+                    return path
+        return None
+
+    def update_context_scope(self):
+        """Render names only; never leak absolute adapter/editor paths in the pane."""
+        if not hasattr(self, "context_scope"):
+            return
+        root = self._active_project_root()
+        project = f"Project: {escape(root.name)}" if root is not None else "No active project (selected context only)"
+        editor = "active editor available" if self._get_current_editor() is not None else "no active editor"
+        selected = ", ".join(escape(Path(path).name) for path in self.selected_files) or "none"
+        self.context_scope.setText(f"{project} · {editor} · selected: {selected}")
+
+    def _project_context(self):
+        self._request_editor = self._get_current_editor()
+        return ProjectContext(
+            project_root=self._active_project_root(),
+            active_editor_text=self.get_current_file_content(),
+            active_editor_name=CURRENT_EDITOR_CONTEXT_FILE,
+            active_editor_available=self._request_editor is not None,
+            selected_context=self.get_project_files(),
+        )
 
     def inject_error_handler(self, shell=None):
         """Install one guarded traceback hook per kernel and start one polling timer."""
@@ -368,32 +432,59 @@ if not getattr(_agent_ipython, "_spyder_code_agent_traceback_hook", False):
             return
         self.chat_display.append(f"<b>You:</b> {escape(user_text)}")
         self.user_input.clear()
-        self._show_local_diagnosis(user_text)
+        if is_traceback_text(user_text):
+            self._show_local_diagnosis(user_text)
+        self.update_context_scope()
         if not all((self.current_base_url, self.current_api_key, self.current_model_name)):
             self.chat_display.append(
-                "<b>System:</b> Local diagnosis is ready. Configure an optional OpenAI-compatible provider for a suggested patch."
+                "<b>System:</b> Local diagnosis is ready. Configure an optional OpenAI-compatible provider "
+                "to enable read-only project-agent exploration."
             )
             return
         self.send_btn.setEnabled(False)
-        context = self._context_string()
+        self.plan_display.setText("Waiting for the provider to produce a debugging plan…")
+        self.activity_display.clear()
         self.worker = LLMWorker(
             user_text,
             self.current_base_url,
             self.current_api_key,
             self.current_model_name,
-            context,
+            self._project_context(),
         )
-        self.worker.text_received.connect(self.on_response)
+        self.worker.activity_received.connect(self.on_agent_activity)
+        self.worker.result_received.connect(self.on_agent_result)
         self.worker.error_occurred.connect(self.show_error)
         self.worker.finished_response.connect(self.on_finished)
         self.worker.start()
 
+    def on_agent_activity(self, activity):
+        if not isinstance(activity, AgentActivity):
+            return
+        if activity.kind == "plan":
+            self.plan_display.setPlainText(activity.message)
+        else:
+            colour = "#444" if activity.ok else "#b00020"
+            self.activity_display.append(f"<span style='color:{colour}'>{escape(activity.message)}</span>")
+
+    def on_agent_result(self, result):
+        if not isinstance(result, AgentRun):
+            self.show_error("Provider returned an invalid agent result.")
+            return
+        self.activity_display.append(
+            f"<span style='color:#444'>Agent completed {result.tool_calls} read-only tool call(s).</span>"
+        )
+        self._render_suggestion(result.suggestion)
+
     def on_response(self, text):
+        """Compatibility path for callers that still provide one JSON suggestion."""
         try:
             suggestion = parse_suggestion(text)
         except AgentResponseError as error:
             self.show_error(str(error))
             return
+        self._render_suggestion(suggestion)
+
+    def _render_suggestion(self, suggestion):
         self.pending_fix = suggestion.fixed_code or None
         self.pending_fix_file = suggestion.fixed_file
         self.pending_fix_editor = (
@@ -403,6 +494,10 @@ if not getattr(_agent_ipython, "_spyder_code_agent_traceback_hook", False):
         parts = []
         if suggestion.error_type:
             parts.append(f"<b>Agent: {escape(suggestion.error_type)}</b><br>{escape(suggestion.description)}")
+        elif suggestion.description:
+            parts.append(f"<b>Agent diagnosis:</b><br>{escape(suggestion.description)}")
+        if suggestion.evidence:
+            parts.append(f"<b>Evidence collected:</b><br>{escape(suggestion.evidence).replace(chr(10), '<br>')}")
         if suggestion.solution:
             parts.append(f"<b>Suggested approach:</b><br>{escape(suggestion.solution).replace(chr(10), '<br>')}")
         if suggestion.example:

@@ -21,7 +21,7 @@ class FakeProvider:
 def test_agent_builds_ml_aware_prompt_and_returns_structured_suggestion():
     provider = FakeProvider(
         '{"error_type":"RuntimeError","description":"shape mismatch",'
-        '"solution":"align batches","example":"x = x.reshape(1, -1)",'
+        '"evidence":"batch dimension differs","solution":"align batches","example":"x = x.reshape(1, -1)",'
         '"fixed_file":"train.py","fixed_code":"print(1)"}'
     )
     service = AgentService(provider)
@@ -30,6 +30,7 @@ def test_agent_builds_ml_aware_prompt_and_returns_structured_suggestion():
 
     assert suggestion.fixed_file == "train.py"
     assert suggestion.fixed_code == "print(1)"
+    assert suggestion.evidence == "batch dimension differs"
     assert "PyTorch" in provider.prompt
     assert "API keys" in provider.prompt
 
@@ -41,6 +42,10 @@ def test_parser_rejects_invalid_json_and_unsafe_paths():
     suggestion = parse_suggestion('{"fixed_file":"../../secrets.py","fixed_code":"bad"}')
     assert suggestion.fixed_file == ""
     assert suggestion.fixed_code == "bad"
+
+    windows_suggestion = parse_suggestion('{"fixed_file":"C:\\\\secrets.py","fixed_code":"bad"}')
+    assert windows_suggestion.fixed_file == ""
+    assert parse_suggestion('{"fixed_file":"C:secrets.py","fixed_code":"bad"}').fixed_file == ""
 
 
 def test_parser_keeps_the_current_editor_sentinel_as_a_safe_filename():
